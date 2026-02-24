@@ -8,6 +8,7 @@
 #define STATUS1_MASK_ATX1050    0x8000
 
 #define STATUS2_MASK_SPLASH     0x0800
+#define STATUS2_MASK_TAPE_FULL  0x8000
 
 #define BUFFER_SIZE 8192
 
@@ -23,6 +24,7 @@
 
 #define A800_GET_REGISTER 0x08
 #define A800_SET_REGISTER 0x09
+#define A800_TAPE_ENQUEUE 0x0A
 
 #define REG_CART1_SELECT  0x01
 #define REG_CART2_SELECT  0x02
@@ -35,6 +37,7 @@
 #define REG_XEX_LOADER    0x09
 #define REG_SIO_TX        0x0A
 #define REG_SIO_SETDIV    0x0B
+#define TAPE_RESET        0x0C
 
 #define REG_ATARI_STATUS1 0x01
 #define REG_ATARI_STATUS2 0x02
