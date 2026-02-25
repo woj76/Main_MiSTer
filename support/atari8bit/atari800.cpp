@@ -261,47 +261,6 @@ static uint16_t get_a800_reg2(uint8_t reg)
 	return r;
 }
 
-static void atari800_tape_enqueue(uint32_t data)
-{
-	EnableIO();
-	spi8(A800_TAPE_ENQUEUE);
-	spi_w((uint16_t)data);
-	spi_w((uint16_t)(data >> 16));
-	DisableIO();
-}
-
-void atari8bit_dma_write(const uint8_t *buf, uint32_t addr, uint32_t len)
-{
-	user_io_set_index(99);
-	user_io_set_download(1, addr);
-	user_io_file_tx_data(buf, len);
-	user_io_set_download(0);
-}
-
-static void atari800_dma_read(uint8_t *buf, uint32_t addr, uint32_t len)
-{
-	user_io_set_index(99);
-	user_io_set_upload(1, addr);
-	user_io_file_rx_data(buf, len);		
-	user_io_set_upload(0);
-}
-
-void atari8bit_dma_zero(uint32_t addr, uint32_t len)
-{
-	memset(a8bit_buffer, 0, BUFFER_SIZE);
-	uint32_t to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
-	
-	user_io_set_index(99);
-	user_io_set_download(1, addr);
-	while(len)
-	{
-		user_io_file_tx_data(a8bit_buffer, to_write);
-		len -= to_write;
-		to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
-	}
-	user_io_set_upload(0);
-}
-
 static void reboot(uint8_t cold, uint8_t pause)
 {
 	int i;
@@ -355,6 +314,100 @@ static void reboot(uint8_t cold, uint8_t pause)
 	set_a8bit_reg(REG_PAUSE, pause);
 }
 
+static void check_reset_pause()
+{
+	uint16_t atari_status1 = get_a8bit_reg(REG_ATARI_STATUS1);
+
+	set_a8bit_reg(REG_PAUSE, atari_status1 & STATUS1_MASK_HALT);
+
+	if (atari_status1 & STATUS1_MASK_SOFTBOOT)
+	{
+		reboot(0, 0);
+	}
+	else if (atari_status1 & STATUS1_MASK_COLDBOOT)
+	{
+		reboot(1, 0);
+	}
+}
+
+static void atari800_tape_wait()
+{
+#ifdef USE_SCHEDULER
+	int counter = 0;
+#endif
+	while(!(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_EMPTY))
+	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
+		counter++;
+		if(counter > 10)
+		{
+			counter = 0;
+			input_poll(0);
+			scheduler_yield();
+		}
+#endif
+	}
+}
+
+static void atari800_tape_enqueue(uint8_t b, uint32_t cnt)
+{
+#ifdef USE_SCHEDULER
+	int counter = 0;
+#endif
+	while(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_FULL)
+	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
+		counter++;
+		if(counter > 10)
+		{
+			counter = 0;
+			input_poll(0);
+			scheduler_yield();
+		}
+#endif
+	}
+	EnableIO();
+	spi8(A800_TAPE_ENQUEUE);
+	uint32_t data = b | (cnt << 1);
+	spi_w((uint16_t)data);
+	spi_w((uint16_t)(data >> 16));
+	DisableIO();
+}
+
+void atari8bit_dma_write(const uint8_t *buf, uint32_t addr, uint32_t len)
+{
+	user_io_set_index(99);
+	user_io_set_download(1, addr);
+	user_io_file_tx_data(buf, len);
+	user_io_set_download(0);
+}
+
+static void atari800_dma_read(uint8_t *buf, uint32_t addr, uint32_t len)
+{
+	user_io_set_index(99);
+	user_io_set_upload(1, addr);
+	user_io_file_rx_data(buf, len);
+	user_io_set_upload(0);
+}
+
+void atari8bit_dma_zero(uint32_t addr, uint32_t len)
+{
+	memset(a8bit_buffer, 0, BUFFER_SIZE);
+	uint32_t to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
+
+	user_io_set_index(99);
+	user_io_set_download(1, addr);
+	while(len)
+	{
+		user_io_file_tx_data(a8bit_buffer, to_write);
+		len -= to_write;
+		to_write = len > BUFFER_SIZE ? BUFFER_SIZE : len;
+	}
+	user_io_set_upload(0);
+}
+
 static void uart_init(uint8_t divisor)
 {
 	set_a8bit_reg(REG_SIO_SETDIV, (divisor << 1) + 1);
@@ -372,7 +425,7 @@ static void uart_send(uint8_t data)
 #endif
 	while(uart_full())
 	{
-		usleep(100);
+		check_reset_pause();
 #ifdef USE_SCHEDULER
 		counter++;
 		if(counter > 10)
@@ -398,7 +451,7 @@ static uint16_t uart_receive()
 #endif
 	while(!uart_available())
 	{
-		usleep(100);
+		check_reset_pause();
 		counter++;
 #ifdef USE_SCHEDULER
 		if(counter > 10)
@@ -798,13 +851,14 @@ static uint64_t get_us(uint64_t offset)
 static uint8_t check_us(uint64_t time)
 {
 	long int remaining = time - get_us(0);
-#ifdef USE_SCHEDULER
 	if(remaining >= (long int)10000)
 	{
+		check_reset_pause();
+#ifdef USE_SCHEDULER
 		input_poll(0);
 		scheduler_yield();
-	}
 #endif
+	}
 	return remaining <= 0;
 }
 
@@ -1859,20 +1913,8 @@ static void process_command()
 	}
 }
 
-// TODO move this
-fileTYPE cas_file = {};
-#define CORE_HZ 28636364
-
-typedef struct  {
-	uint32_t signature;
-	uint16_t chunk_length;
-	union {
-		uint8_t aux_b[2];
-		uint16_t aux_w;
-	} aux;
-} __attribute__((packed)) cas_header_t;
-
-static cas_header_t cas_header;
+#define CORE_HZ         28636364
+#define MAX_MS          60000
 
 #define cas_header_FUJI 0x494A5546
 #define cas_header_baud 0x64756162
@@ -1883,12 +1925,25 @@ static cas_header_t cas_header;
 #define cas_header_pwmd 0x646D7770
 #define cas_header_pwml 0x6C6D7770
 
+typedef struct  {
+	uint32_t signature;
+	uint16_t chunk_length;
+	union {
+		uint8_t aux_b[2];
+		uint16_t aux_w;
+	} aux;
+} __attribute__((packed)) cas_header_t;
+
+static fileTYPE cas_file = {};
+static cas_header_t cas_header;
+
 static uint32_t pwm_sample_duration;
 static uint32_t cas_sample_duration;
 static uint16_t silence_duration;
 
 static uint32_t cas_offset;
 static uint8_t cas_block_turbo;
+static uint8_t cas_block_turbo_prev;
 static uint16_t cas_block_index;
 static uint16_t cas_block_multiple;
 static uint8_t cas_fsk_bit;
@@ -1937,16 +1992,20 @@ static uint32_t cas_read_forward(uint32_t offset) {
 				break;
 
 			case cas_header_data:
+				cas_block_turbo_prev = cas_block_turbo;
 				cas_block_turbo = 0;
 				silence_duration = cas_header.aux.aux_w;
 				cas_block_multiple = 1;
+				atari800_tape_enqueue(1, 0x00000000);
 				goto cas_read_forward_exit;
 
 			case cas_header_fsk:
+				cas_block_turbo_prev = cas_block_turbo;
 				cas_block_turbo = 0;
 				silence_duration = cas_header.aux.aux_w;
 				cas_block_multiple = 2;
 				cas_fsk_bit = 0;
+				atari800_tape_enqueue(1, 0x00000000);
 				goto cas_read_forward_exit;
 				
 			case cas_header_pwms:
@@ -1977,21 +2036,27 @@ static uint32_t cas_read_forward(uint32_t offset) {
 				break;
 
 			case cas_header_pwmc:
+				cas_block_turbo_prev = cas_block_turbo;
 				cas_block_turbo = 1;
 				silence_duration = cas_header.aux.aux_w;
 				cas_block_multiple = 3;
+				atari800_tape_enqueue(1, 0x00000001);
 				goto cas_read_forward_exit;
 
 			case cas_header_pwmd:
+				cas_block_turbo_prev = cas_block_turbo;
 				cas_block_turbo = 1;
 				cas_block_multiple = 1;
+				atari800_tape_enqueue(1, 0x00000001);
 				goto cas_read_forward_exit;
 
 			case cas_header_pwml:
+				cas_block_turbo_prev = cas_block_turbo;
 				cas_block_turbo = 1;
 				silence_duration = cas_header.aux.aux_w;
 				cas_block_multiple = 2;
 				cas_fsk_bit = pwm_bit;
+				atari800_tape_enqueue(1, 0x00000001);
 				goto cas_read_forward_exit;
 
 			default:
@@ -2003,19 +2068,113 @@ cas_read_forward_exit:
 	return offset;
 }
 
+static void handle_cas()
+{
+	if(!(get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_ACT)) return;
+
+	int to_read = (cas_block_turbo ? 128 : 256) * cas_block_multiple;
+	if(to_read >= cas_header.chunk_length - cas_block_index) to_read = cas_header.chunk_length - cas_block_index;
+
+	if(cas_offset >= cas_file.size || !FileSeek(&cas_file, cas_offset, SEEK_SET) || FileReadAdv(&cas_file, a8bit_buffer, to_read) != to_read)
+	{
+		FileClose(&cas_file);
+		return;
+	}
+	cas_offset += to_read;
+
+	uint8_t silence_bit = (cas_block_turbo ? 0 : 1);
+
+	while(silence_duration > 0) {
+		uint16_t silence_block_len = silence_duration;
+		if(silence_block_len >= MAX_MS) silence_block_len = MAX_MS;
+		atari800_tape_enqueue(silence_bit, ((CORE_HZ + 500) / 1000) * silence_block_len);
+		silence_duration -= silence_block_len;
+	}
+
+	cas_block_index += to_read;
+
+	int bs, be, bd;
+	uint8_t b;
+	uint16_t ld;
+
+	for(int i=0; i < to_read; i += cas_block_multiple) {
+		switch(cas_header.signature) {
+
+			case cas_header_data:
+				atari800_tape_enqueue(0, cas_sample_duration);
+				b = a8bit_buffer[i];
+				for(int j = 0; j != 8; j++)
+				{
+					atari800_tape_enqueue(b & 0x1, cas_sample_duration);
+					b >>= 1;
+				}
+				atari800_tape_enqueue(1, cas_sample_duration);
+				break;
+
+			case cas_header_fsk:
+			case cas_header_pwml:
+				ld = *(uint16_t *)&a8bit_buffer[i];
+				if(ld) atari800_tape_enqueue(cas_fsk_bit, (cas_block_turbo ? pwm_sample_duration : ((CORE_HZ + 5000)/10000) * ld));
+				cas_fsk_bit ^= 1;
+				break;
+
+			case cas_header_pwmc:
+				ld = a8bit_buffer[i+1] | (a8bit_buffer[i+2] << 8);
+				for(int j=0; j < ld; j++)
+				{
+					atari800_tape_enqueue(pwm_bit, a8bit_buffer[i] * pwm_sample_duration / 2);
+					atari800_tape_enqueue(pwm_bit ^ 1, a8bit_buffer[i] * pwm_sample_duration / 2);
+				}
+				break;
+
+			case cas_header_pwmd:
+				b = a8bit_buffer[i];
+				if (pwm_bit_order)
+				{
+					bs = 7; be = -1; bd = -1;
+				}
+				else
+				{
+					bs = 0; be = 8; bd = 1;
+				}
+				for(int j = bs; j != be; j += bd)
+				{
+					uint8_t d = cas_header.aux.aux_b[(b >> j) & 0x1];
+					atari800_tape_enqueue(pwm_bit, d * pwm_sample_duration / 2);
+					atari800_tape_enqueue(pwm_bit ^ 1, d * pwm_sample_duration / 2);
+				}
+			default:
+				break;
+		}
+	}
+	if(cas_block_index == cas_header.chunk_length && cas_offset < cas_file.size)
+	{
+		cas_offset = cas_read_forward(cas_offset);
+		if(!cas_offset)
+		{
+			FileClose(&cas_file);
+		}
+		else if(cas_header.signature == cas_header_pwmc || cas_header.signature == cas_header_data || (cas_header.signature == cas_header_fsk && silence_duration) || cas_block_turbo_prev^cas_block_turbo)
+		{
+			atari800_tape_wait();
+			wait_us(10000);
+		}
+	}
+}
 
 void atari800_set_image(int ext_index, int file_index, const char *name)
 {
-	if(file_index == 7) // CAS file
+	if(file_index == 7 || file_index == 8) // CAS file (8 with auto boot)
 	{
 		cas_offset = 0;
+		cas_block_turbo = 0;
+		cas_block_turbo_prev = 0;
 		set_a8bit_reg(TAPE_RESET, 1);
 		set_a8bit_reg(TAPE_RESET, 0);
 	
 		if(name[0] && FileOpen(&cas_file, name))
 		{
 			cas_sample_duration = (CORE_HZ + 300) / 600;
-			// cas_size = cas_file.size; // TODO
 			if(FileReadAdv(&cas_file, (uint8_t *)&cas_header, sizeof(cas_header_t)) == sizeof(cas_header_t) && cas_header.signature == cas_header_FUJI)
 			{
 				cas_offset = cas_read_forward(cas_header.chunk_length + sizeof(cas_header_t));
@@ -2025,7 +2184,24 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 		if(!cas_offset)
 		{
 			FileClose(&cas_file);
-		}		
+		}
+		else
+		{
+			atari800_tape_enqueue(1, 0x00000000);
+		}
+		if(file_index == 8 && cas_offset)
+		{
+			set_a8bit_reg(REG_PAUSE, 1);
+			set_a8bit_reg(REG_CART1_SELECT, 0);
+			set_a8bit_reg(REG_CART2_SELECT, 0);
+			reboot(1, 0);
+			set_a8bit_reg(REG_OPTION_FORCE, 1);
+			set_a8bit_reg(REG_START_FORCE, 1);
+			set_a8bit_reg(REG_OPTION_FORCE, 0);
+			set_a8bit_reg(REG_START_FORCE, 0);
+			set_a8bit_reg(REG_SPACE_FORCE, 1);
+			set_a8bit_reg(REG_SPACE_FORCE, 0);
+		}
 	}
 	else if(file_index == 5) // XEX file
 	{
@@ -2303,20 +2479,10 @@ xex_eof:
 
 void atari800_poll()
 {
-	uint16_t atari_status1 = get_a8bit_reg(REG_ATARI_STATUS1);
-
-	set_a8bit_reg(REG_PAUSE, atari_status1 & STATUS1_MASK_HALT);
-
-	if (atari_status1 & STATUS1_MASK_SOFTBOOT)
-	{
-		reboot(0, 0);	
-	}
-	else if (atari_status1 & STATUS1_MASK_COLDBOOT)
-	{
-		reboot(1, 0);	
-	}
+	check_reset_pause();
 	
 	if(xex_file.opened()) handle_xex();
+	if(cas_file.opened()) handle_cas();
 	handle_pbi();
 	process_command();
 }
@@ -2359,6 +2525,9 @@ void atari800_reset()
 		FileClose(&drive_infos[i].file);
 	}
 	FileClose(&xex_file);
+	FileClose(&cas_file);
+	set_a8bit_reg(TAPE_RESET, 1);
+	set_a8bit_reg(TAPE_RESET, 0);
 	speed_index = 0;
 	uart_init(speeds[speed_index] + 6);
 	reboot(1, 0);

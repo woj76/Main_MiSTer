@@ -9,6 +9,8 @@
 
 #define STATUS2_MASK_SPLASH     0x0800
 #define STATUS2_MASK_TAPE_FULL  0x8000
+#define STATUS2_MASK_TAPE_EMPTY 0x4000
+#define STATUS2_MASK_TAPE_ACT   0x2000
 
 #define BUFFER_SIZE 8192
 
@@ -38,6 +40,8 @@
 #define REG_SIO_TX        0x0A
 #define REG_SIO_SETDIV    0x0B
 #define TAPE_RESET        0x0C
+#define REG_START_FORCE   0x0D
+#define REG_SPACE_FORCE   0x0E
 
 #define REG_ATARI_STATUS1 0x01
 #define REG_ATARI_STATUS2 0x02
