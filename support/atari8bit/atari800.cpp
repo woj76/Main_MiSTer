@@ -2158,6 +2158,7 @@ static void handle_cas()
 		}
 		else if(cas_header.signature == cas_header_pwmc || cas_header.signature == cas_header_data || (cas_header.signature == cas_header_fsk && silence_duration) || cas_block_turbo_prev ^ cas_block_turbo)
 		{
+			//atari800_tape_enqueue(cas_block_turbo ? 0 : 1, 16);
 			atari800_tape_wait();
 			wait_us(20000);
 		}
@@ -2188,11 +2189,7 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 		{
 			FileClose(&cas_file);
 		}
-		else
-		{
-			atari800_tape_enqueue(1, 0x00000000);
-		}
-		if(file_index == 8 && cas_offset)
+		else if(file_index == 8)
 		{
 			set_a8bit_reg(REG_PAUSE, 1);
 			set_a8bit_reg(REG_CART1_SELECT, 0);
